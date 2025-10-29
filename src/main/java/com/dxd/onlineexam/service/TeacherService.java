@@ -149,7 +149,8 @@ public class TeacherService {
         vo.setType(question.getType());
         vo.setTypeName(getTypeName(question.getType()));
         
-        // 获取科目名称
+        // 获取科目ID和名称
+        vo.setSubjectId(question.getSubjectId());
         Subject subject = subjectMapper.selectById(question.getSubjectId());
         vo.setSubject(subject != null ? subject.getSubjectName() : "");
         
@@ -158,6 +159,7 @@ public class TeacherService {
         vo.setScore(question.getDefaultScore());
         vo.setCorrectAnswer(question.getCorrectAnswer());
         vo.setAnalysis(question.getAnalysis());
+        vo.setReferenceAnswer(question.getReferenceAnswer());
         
         // 获取选项
         if (!"subjective".equals(question.getType())) {

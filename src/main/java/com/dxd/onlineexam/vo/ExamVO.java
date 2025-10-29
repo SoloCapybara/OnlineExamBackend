@@ -13,6 +13,7 @@ public class ExamVO {
     private Integer duration;
     private BigDecimal totalScore;
     private String status;
+    private String paperStatus;  // 试卷状态：not_started, ongoing, submitted
     private Boolean isSubmitted;
     private BigDecimal score;
 }

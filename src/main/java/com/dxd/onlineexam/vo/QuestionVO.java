@@ -11,6 +11,7 @@ public class QuestionVO {
     private String content;
     private String type;
     private String typeName;
+    private Long subjectId;  // 添加科目ID
     private String subject;
     private String difficulty;
     private String difficultyName;
@@ -18,6 +19,7 @@ public class QuestionVO {
     private List<OptionVO> options;
     private String correctAnswer;
     private String analysis;
+    private String referenceAnswer;  // 添加主观题参考答案
     
     @Data
     public static class OptionVO {

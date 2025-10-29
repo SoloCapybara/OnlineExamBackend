@@ -26,6 +26,7 @@ public class StudentService {
     private final ExamQuestionMapper examQuestionMapper;
     private final AnswerRecordMapper answerRecordMapper;
     private final QuestionOptionMapper questionOptionMapper;
+    private final SubjectMapper subjectMapper;
 
     /**
      * 学生首页统计
@@ -93,7 +94,14 @@ public class StudentService {
             piWrapper.eq("exam_id", exam.getExamId())
                     .eq("student_id", studentId);
             PaperInstance paperInstance = paperInstanceMapper.selectOne(piWrapper);
-            vo.setIsSubmitted(paperInstance != null && "submitted".equals(paperInstance.getStatus()));
+            
+            if (paperInstance != null) {
+                vo.setPaperStatus(paperInstance.getStatus());
+                vo.setIsSubmitted("submitted".equals(paperInstance.getStatus()));
+            } else {
+                vo.setPaperStatus("not_started");
+                vo.setIsSubmitted(false);
+            }
             
             // 如果已批改，显示分数
             if (paperInstance != null && paperInstance.getIsGraded() == 1) {
@@ -105,37 +113,48 @@ public class StudentService {
     }
 
     /**
-     * 获取成绩列表
+     * 获取成绩列表（显示所有已提交的试卷）
      */
     public List<ScoreVO> getScoreList(Long studentId) {
-        QueryWrapper<Score> wrapper = new QueryWrapper<>();
+        // 查询所有已提交的试卷实例
+        QueryWrapper<PaperInstance> wrapper = new QueryWrapper<>();
         wrapper.eq("student_id", studentId)
-               .orderByDesc("create_time");
+               .eq("status", "submitted")
+               .orderByDesc("submit_time");
         
-        List<Score> scores = scoreMapper.selectList(wrapper);
+        List<PaperInstance> papers = paperInstanceMapper.selectList(wrapper);
         
-        return scores.stream().map(score -> {
+        return papers.stream().map(paper -> {
             ScoreVO vo = new ScoreVO();
             
             // 获取考试信息
-            Exam exam = examMapper.selectById(score.getExamId());
-            vo.setExamId(score.getExamId());
+            Exam exam = examMapper.selectById(paper.getExamId());
+            vo.setExamId(paper.getExamId());
             vo.setExamName(exam != null ? exam.getExamName() : "");
-            vo.setExamDate(score.getCreateTime().toLocalDate().toString());
-            vo.setObjectiveScore(score.getObjectiveScore());
-            vo.setSubjectiveScore(score.getSubjectiveScore());
-            vo.setTotalScore(score.getTotalScore());
+            vo.setExamDate(paper.getSubmitTime() != null ? 
+                paper.getSubmitTime().toLocalDate().toString() : "");
             
-            // 排名
-            if (score.getRank() != null) {
-                // 获取总人数
-                QueryWrapper<Score> countWrapper = new QueryWrapper<>();
-                countWrapper.eq("exam_id", score.getExamId());
-                long totalStudents = scoreMapper.selectCount(countWrapper);
-                vo.setRank(score.getRank() + "/" + totalStudents);
+            // 分数信息（可能为null，未批改时）
+            vo.setObjectiveScore(paper.getObjectiveScore());
+            vo.setSubjectiveScore(paper.getSubjectiveScore());
+            vo.setTotalScore(paper.getTotalScore());
+            
+            // 是否已批改
+            vo.setIsGraded(paper.getIsGraded() == 1);
+            
+            // 排名（只有批改后才有）
+            if (paper.getIsGraded() == 1) {
+                QueryWrapper<Score> scoreWrapper = new QueryWrapper<>();
+                scoreWrapper.eq("paper_instance_id", paper.getPaperInstanceId());
+                Score score = scoreMapper.selectOne(scoreWrapper);
+                if (score != null && score.getClassRank() != null) {
+                    // 获取班级总人数
+                    QueryWrapper<PaperInstance> countWrapper = new QueryWrapper<>();
+                    countWrapper.eq("exam_id", paper.getExamId());
+                    long totalStudents = paperInstanceMapper.selectCount(countWrapper);
+                    vo.setRank(score.getClassRank() + "/" + totalStudents);
+                }
             }
-            
-            vo.setIsGraded(score.getTotalScore() != null);
             
             return vo;
         }).collect(Collectors.toList());
@@ -150,10 +169,24 @@ public class StudentService {
             throw new RuntimeException("考试不存在");
         }
         
+        System.out.println("=== 学生端获取考试详情 ===");
+        System.out.println("考试ID: " + exam.getExamId());
+        System.out.println("考试名称: " + exam.getExamName());
+        System.out.println("科目ID: " + exam.getSubjectId());
+        
         ExamDetailVO vo = new ExamDetailVO();
         vo.setExamId(exam.getExamId());
         vo.setExamName(exam.getExamName());
         vo.setDescription(exam.getDescription());
+        vo.setSubjectId(exam.getSubjectId());  // 添加科目ID
+        
+        // 获取科目名称
+        Subject subject = subjectMapper.selectById(exam.getSubjectId());
+        System.out.println("查询到的科目: " + (subject != null ? subject.getSubjectName() : "null"));
+        vo.setSubjectName(subject != null ? subject.getSubjectName() : "未设置");
+        System.out.println("设置的科目名称: " + vo.getSubjectName());
+        System.out.println("======================");
+        
         vo.setStartTime(exam.getStartTime());
         vo.setEndTime(exam.getEndTime());
         vo.setDuration(exam.getDuration());
@@ -223,10 +256,13 @@ public class StudentService {
         vo.setPaperInstanceId(paperInstance.getPaperInstanceId());
         vo.setExamName(exam.getExamName());
         vo.setStartTime(paperInstance.getStartTime());
+        vo.setDuration(exam.getDuration());  // 设置考试时长
+        vo.setTotalScore(exam.getTotalScore());  // 设置总分
         
-        // 计算剩余时间
-        long elapsedSeconds = Duration.between(paperInstance.getStartTime(), LocalDateTime.now()).getSeconds();
-        int remainingTime = Math.max(0, paperInstance.getRemainingTime() - (int)elapsedSeconds);
+        // 计算剩余时间（基于考试结束时间）
+        LocalDateTime now = LocalDateTime.now();
+        long secondsUntilEnd = Duration.between(now, exam.getEndTime()).getSeconds();
+        int remainingTime = Math.max(0, (int)secondsUntilEnd);
         vo.setRemainingTime(remainingTime);
         
         // 获取考试题目

@@ -12,6 +12,8 @@ public class PaperVO {
     private String examName;
     private LocalDateTime startTime;
     private Integer remainingTime;
+    private Integer duration;  // 考试时长（分钟）
+    private BigDecimal totalScore;  // 总分
     private List<QuestionVO> questions;
     
     @Data
