@@ -27,6 +27,7 @@ public class StudentService {
     private final AnswerRecordMapper answerRecordMapper;
     private final QuestionOptionMapper questionOptionMapper;
     private final SubjectMapper subjectMapper;
+    private final UserMapper userMapper;
 
     /**
      * 学生首页统计
@@ -142,6 +143,16 @@ public class StudentService {
             // 是否已批改
             vo.setIsGraded(paper.getIsGraded() == 1);
             
+            // 判断客观题是否已批改（objective_score不为null）
+            vo.setObjectiveGraded(paper.getObjectiveScore() != null);
+            
+            // 判断主观题是否已批改（subjective_score不为null且is_graded=1）
+            vo.setSubjectiveGraded(paper.getSubjectiveScore() != null && paper.getIsGraded() == 1);
+            
+            // 检查考试是否有主观题
+            boolean hasSubjective = hasSubjectiveQuestions(paper.getExamId());
+            vo.setHasSubjective(hasSubjective);
+            
             // 排名（只有批改后才有）
             if (paper.getIsGraded() == 1) {
                 QueryWrapper<Score> scoreWrapper = new QueryWrapper<>();
@@ -158,6 +169,24 @@ public class StudentService {
             
             return vo;
         }).collect(Collectors.toList());
+    }
+    
+    /**
+     * 检查考试是否有主观题
+     */
+    private boolean hasSubjectiveQuestions(Long examId) {
+        QueryWrapper<ExamQuestion> wrapper = new QueryWrapper<>();
+        wrapper.eq("exam_id", examId);
+        List<ExamQuestion> examQuestions = examQuestionMapper.selectList(wrapper);
+        
+        for (ExamQuestion eq : examQuestions) {
+            Question question = questionMapper.selectById(eq.getQuestionId());
+            if (question != null && "subjective".equals(question.getType())) {
+                return true;
+            }
+        }
+        
+        return false;
     }
 
     /**
@@ -386,17 +415,39 @@ public class StudentService {
         // 自动批改客观题
         BigDecimal objectiveScore = autoGradeObjectiveQuestions(request.getPaperInstanceId());
         
+        // 检查考试是否有主观题
+        boolean hasSubjective = hasSubjectiveQuestions(paperInstance.getExamId());
+        
         // 更新试卷实例状态
         paperInstance.setStatus("submitted");
         paperInstance.setSubmitTime(now);
         paperInstance.setObjectiveScore(objectiveScore);
         paperInstance.setUpdateTime(now);
+        
+        BigDecimal totalScore = objectiveScore;
+        
+        if (!hasSubjective) {
+            // 没有主观题，直接完成批改
+            paperInstance.setSubjectiveScore(BigDecimal.ZERO);
+            paperInstance.setTotalScore(objectiveScore);
+            paperInstance.setIsGraded(1);
+            totalScore = objectiveScore;
+            
+            // 创建成绩记录
+            createScoreRecord(paperInstance);
+        } else {
+            // 有主观题，等待教师批改
+            paperInstance.setIsGraded(0);
+            totalScore = null;
+        }
+        
         paperInstanceMapper.updateById(paperInstance);
         
         Map<String, Object> result = new HashMap<>();
         result.put("submitTime", now);
         result.put("objectiveScore", objectiveScore);
-        result.put("totalScore", null);
+        result.put("totalScore", totalScore);
+        result.put("hasSubjective", hasSubjective);
         
         return result;
     }
@@ -493,6 +544,8 @@ public class StudentService {
         
         ScoreDetailVO vo = new ScoreDetailVO();
         vo.setExamName(exam.getExamName());
+        vo.setExamDate(paperInstance.getSubmitTime() != null ? 
+            paperInstance.getSubmitTime().toLocalDate().toString() : "");
         vo.setObjectiveScore(paperInstance.getObjectiveScore());
         vo.setSubjectiveScore(paperInstance.getSubjectiveScore());
         vo.setTotalScore(paperInstance.getTotalScore());
@@ -505,6 +558,7 @@ public class StudentService {
         
         if (score != null && score.getRank() != null) {
             vo.setRank(score.getRank());
+            vo.setClassRank(score.getClassRank());
             
             // 获取总人数
             QueryWrapper<Score> countWrapper = new QueryWrapper<>();
@@ -536,16 +590,38 @@ public class StudentService {
             detail.setQuestionNumber(eq.getQuestionNumber());
             detail.setQuestionContent(question.getContent());
             detail.setQuestionType(question.getType());
-            detail.setScore(eq.getScore());
+            detail.setTypeName(getTypeName(question.getType()));
+            detail.setScore(answerRecord != null && answerRecord.getActualScore() != null ? 
+                answerRecord.getActualScore() : BigDecimal.ZERO);
+            detail.setMaxScore(eq.getScore());
             
             if (answerRecord != null) {
                 detail.setStudentAnswer(answerRecord.getStudentAnswer());
                 detail.setIsCorrect(answerRecord.getIsCorrect() != null && answerRecord.getIsCorrect() == 1);
                 detail.setActualScore(answerRecord.getActualScore());
                 detail.setTeacherComment(answerRecord.getTeacherComment());
+                detail.setComment(answerRecord.getTeacherComment());
             }
             
             detail.setCorrectAnswer(question.getCorrectAnswer());
+            detail.setAnalysis(question.getAnalysis());
+            
+            // 获取题目选项（非主观题）
+            if (!"subjective".equals(question.getType())) {
+                QueryWrapper<QuestionOption> optionWrapper = new QueryWrapper<>();
+                optionWrapper.eq("question_id", question.getQuestionId())
+                           .orderByAsc("sort_order");
+                List<QuestionOption> options = questionOptionMapper.selectList(optionWrapper);
+                
+                List<ScoreDetailVO.QuestionDetail.OptionDetail> optionDetails = options.stream().map(option -> {
+                    ScoreDetailVO.QuestionDetail.OptionDetail optionDetail = new ScoreDetailVO.QuestionDetail.OptionDetail();
+                    optionDetail.setLabel(option.getOptionLabel());
+                    optionDetail.setContent(option.getContent());
+                    return optionDetail;
+                }).collect(Collectors.toList());
+                
+                detail.setOptions(optionDetails);
+            }
             
             return detail;
         }).collect(Collectors.toList());
@@ -553,6 +629,81 @@ public class StudentService {
         vo.setQuestions(questionDetails);
         
         return vo;
+    }
+    
+    /**
+     * 获取题目类型名称
+     */
+    private String getTypeName(String type) {
+        switch (type) {
+            case "single": return "单选题";
+            case "multiple": return "多选题";
+            case "judge": return "判断题";
+            case "subjective": return "主观题";
+            default: return "未知类型";
+        }
+    }
+    
+    /**
+     * 创建成绩记录
+     */
+    private void createScoreRecord(PaperInstance paperInstance) {
+        // 检查是否已存在成绩记录
+        QueryWrapper<Score> wrapper = new QueryWrapper<>();
+        wrapper.eq("paper_instance_id", paperInstance.getPaperInstanceId());
+        Score existingScore = scoreMapper.selectOne(wrapper);
+        
+        if (existingScore != null) {
+            // 更新现有记录
+            existingScore.setObjectiveScore(paperInstance.getObjectiveScore());
+            existingScore.setSubjectiveScore(paperInstance.getSubjectiveScore());
+            existingScore.setTotalScore(paperInstance.getTotalScore());
+            existingScore.setUpdateTime(LocalDateTime.now());
+            scoreMapper.updateById(existingScore);
+        } else {
+            // 创建新记录
+            User student = userMapper.selectById(paperInstance.getStudentId());
+            Exam exam = examMapper.selectById(paperInstance.getExamId());
+            
+            Score score = new Score();
+            score.setPaperInstanceId(paperInstance.getPaperInstanceId());
+            score.setExamId(paperInstance.getExamId());
+            score.setStudentId(paperInstance.getStudentId());
+            score.setClassId(student != null ? student.getClassId() : null);
+            score.setObjectiveScore(paperInstance.getObjectiveScore());
+            score.setSubjectiveScore(paperInstance.getSubjectiveScore());
+            score.setTotalScore(paperInstance.getTotalScore());
+            
+            // 判断是否及格
+            if (exam != null && exam.getPassingScore() != null) {
+                score.setIsPassed(paperInstance.getTotalScore().compareTo(exam.getPassingScore()) >= 0 ? 1 : 0);
+            }
+            
+            score.setCreateTime(LocalDateTime.now());
+            score.setUpdateTime(LocalDateTime.now());
+            
+            scoreMapper.insert(score);
+        }
+        
+        // 计算排名
+        calculateRanking(paperInstance.getExamId());
+    }
+    
+    /**
+     * 计算排名
+     */
+    private void calculateRanking(Long examId) {
+        QueryWrapper<Score> wrapper = new QueryWrapper<>();
+        wrapper.eq("exam_id", examId)
+               .orderByDesc("total_score");
+        
+        List<Score> scores = scoreMapper.selectList(wrapper);
+        
+        int rank = 1;
+        for (Score score : scores) {
+            score.setRank(rank++);
+            scoreMapper.updateById(score);
+        }
     }
 }
 
