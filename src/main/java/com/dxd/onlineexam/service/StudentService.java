@@ -624,10 +624,17 @@ public class StudentService {
             }
             
             detail.setCorrectAnswer(question.getCorrectAnswer());
+            // 主观题提供参考答案
+            {
+                String t = question.getType() == null ? "" : question.getType().trim().toLowerCase();
+                if ("subjective".equals(t) || "essay".equals(t)) {
+                    detail.setReferenceAnswer(question.getReferenceAnswer());
+                }
+            }
             detail.setAnalysis(question.getAnalysis());
             
             // 获取题目选项（非主观题）
-            if (!"subjective".equals(question.getType())) {
+            if (!"subjective".equals(question.getType()) && !"essay".equalsIgnoreCase(String.valueOf(question.getType()))) {
                 QueryWrapper<QuestionOption> optionWrapper = new QueryWrapper<>();
                 optionWrapper.eq("question_id", question.getQuestionId())
                            .orderByAsc("sort_order");

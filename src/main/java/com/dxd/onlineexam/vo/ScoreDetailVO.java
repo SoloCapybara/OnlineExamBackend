@@ -28,6 +28,7 @@ public class ScoreDetailVO {
         private BigDecimal maxScore;  // 添加满分
         private String studentAnswer;
         private String correctAnswer;
+        private String referenceAnswer;  // 主观题参考答案
         private Boolean isCorrect;
         private BigDecimal actualScore;
         private String teacherComment;

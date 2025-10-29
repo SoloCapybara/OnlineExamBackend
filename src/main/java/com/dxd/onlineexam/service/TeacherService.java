@@ -191,15 +191,38 @@ public class TeacherService {
         // 生成题目编码
         String questionCode = generateQuestionCode();
         
+        // 规范化：多选题将正确答案按字母排序后存储，避免同义重复
+        String normalizedType = request.getType();
+        String normalizedCorrect = request.getCorrectAnswer();
+        if ("multiple_choice".equals(normalizedType) && normalizedCorrect != null) {
+            String[] parts = normalizedCorrect.split(",");
+            normalizedCorrect = java.util.Arrays.stream(parts)
+                    .map(String::trim)
+                    .filter(s -> !s.isEmpty())
+                    .sorted()
+                    .reduce((a,b) -> a + "," + b).orElse("");
+        }
+        
+        // 重复检测：内容 + 类型 + 正确答案 完全相同则视为重复（仅在未删除状态）
+        QueryWrapper<Question> dupWrapper = new QueryWrapper<>();
+        dupWrapper.eq("status", 1)
+                  .eq("content", request.getContent())
+                  .eq("type", normalizedType)
+                  .eq("correct_answer", normalizedCorrect);
+        Long dupCount = questionMapper.selectCount(dupWrapper);
+        if (dupCount != null && dupCount > 0) {
+            throw new RuntimeException("题目重复：相同内容、类型与答案已存在");
+        }
+        
         // 创建题目
         Question question = new Question();
         question.setQuestionCode(questionCode);
         question.setContent(request.getContent());
-        question.setType(request.getType());
+        question.setType(normalizedType);
         question.setSubjectId(request.getSubjectId());
         question.setDifficulty(request.getDifficulty());
         question.setDefaultScore(request.getScore());
-        question.setCorrectAnswer(request.getCorrectAnswer());
+        question.setCorrectAnswer(normalizedCorrect);
         question.setAnalysis(request.getAnalysis());
         question.setReferenceAnswer(request.getReferenceAnswer());
         question.setCreatorId(teacherId);
