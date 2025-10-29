@@ -32,35 +32,37 @@ public class GradingService {
      * 获取待自动判卷的考试列表
      */
     public List<PendingExamVO> getPendingAutoGradingExams() {
-        QueryWrapper<Exam> wrapper = new QueryWrapper<>();
-        wrapper.eq("status", "published")
-               .lt("end_time", LocalDateTime.now());
-        
-        List<Exam> exams = examMapper.selectList(wrapper);
-        
-        return exams.stream().map(exam -> {
+        // 放宽条件：只要存在“已提交且未自动判客观题”的试卷，就显示对应考试
+        QueryWrapper<PaperInstance> piWrapper = new QueryWrapper<>();
+        piWrapper.eq("status", "submitted")
+                 .isNull("objective_score");
+
+        List<PaperInstance> pendingPapers = paperInstanceMapper.selectList(piWrapper);
+
+        // 按 examId 分组统计
+        Map<Long, Long> examIdToUngradedCount = pendingPapers.stream()
+                .collect(Collectors.groupingBy(PaperInstance::getExamId, Collectors.counting()));
+
+        return examIdToUngradedCount.entrySet().stream().map(entry -> {
+            Long examId = entry.getKey();
+            int ungradedCount = entry.getValue().intValue();
+
+            Exam exam = examMapper.selectById(examId);
             PendingExamVO vo = new PendingExamVO();
-            vo.setExamId(exam.getExamId());
-            vo.setExamName(exam.getExamName());
-            vo.setEndTime(exam.getEndTime());
-            
-            // 已提交试卷数
-            QueryWrapper<PaperInstance> submittedWrapper = new QueryWrapper<>();
-            submittedWrapper.eq("exam_id", exam.getExamId())
-                           .eq("status", "submitted");
-            int submittedCount = Math.toIntExact(paperInstanceMapper.selectCount(submittedWrapper));
-            vo.setSubmittedCount(submittedCount);
-            
-            // 未自动判卷数（客观题分数为null）
-            QueryWrapper<PaperInstance> ungradedWrapper = new QueryWrapper<>();
-            ungradedWrapper.eq("exam_id", exam.getExamId())
-                          .eq("status", "submitted")
-                          .isNull("objective_score");
-            int ungradedCount = Math.toIntExact(paperInstanceMapper.selectCount(ungradedWrapper));
+            vo.setExamId(examId);
+            vo.setExamName(exam != null ? exam.getExamName() : "");
+            vo.setEndTime(exam != null ? exam.getEndTime() : null);
             vo.setUngradedCount(ungradedCount);
-            
+
+            // 统计已提交总数（用于展示）
+            QueryWrapper<PaperInstance> submittedCountWrapper = new QueryWrapper<>();
+            submittedCountWrapper.eq("exam_id", examId)
+                                 .eq("status", "submitted");
+            int submittedCount = Math.toIntExact(paperInstanceMapper.selectCount(submittedCountWrapper));
+            vo.setSubmittedCount(submittedCount);
+
             return vo;
-        }).filter(vo -> vo.getUngradedCount() > 0)
+        }).sorted(Comparator.comparing(PendingExamVO::getEndTime, Comparator.nullsLast(Comparator.naturalOrder())))
           .collect(Collectors.toList());
     }
 
@@ -137,7 +139,7 @@ public class GradingService {
             Question question = questionMapper.selectById(record.getQuestionId());
             
             // 只批改客观题
-            if ("subjective".equals(question.getType())) {
+            if ("subjective".equalsIgnoreCase(question.getType())) {
                 continue;
             }
             
@@ -151,14 +153,11 @@ public class GradingService {
                 continue;
             }
             
-            // 判断答案是否正确
-            boolean isCorrect = checkAnswer(question, record.getStudentAnswer());
-            
-            BigDecimal actualScore = isCorrect ? examQuestion.getScore() : BigDecimal.ZERO;
+            BigDecimal actualScore = computeObjectiveScore(question, record.getStudentAnswer(), examQuestion.getScore());
             totalScore = totalScore.add(actualScore);
             
-            // 更新答题记录
-            record.setIsCorrect(isCorrect ? 1 : 0);
+            // 更新答题记录（满分记为正确，否则记为不完全正确）
+            record.setIsCorrect(actualScore != null && actualScore.compareTo(examQuestion.getScore()) == 0 ? 1 : 0);
             record.setActualScore(actualScore);
             record.setUpdateTime(LocalDateTime.now());
             answerRecordMapper.updateById(record);
@@ -170,25 +169,65 @@ public class GradingService {
     /**
      * 检查答案是否正确
      */
-    private boolean checkAnswer(Question question, String studentAnswer) {
-        if (studentAnswer == null || question.getCorrectAnswer() == null) {
-            return false;
+    private BigDecimal computeObjectiveScore(Question question, String studentAnswer, BigDecimal fullScore) {
+        if (question == null || fullScore == null || fullScore.compareTo(BigDecimal.ZERO) <= 0) {
+            return BigDecimal.ZERO;
+        }
+        String qType = question.getType() == null ? "" : question.getType().trim().toLowerCase();
+        String correct = question.getCorrectAnswer();
+        if (correct == null || correct.trim().isEmpty()) {
+            return BigDecimal.ZERO;
+        }
+        String answer = studentAnswer == null ? "" : studentAnswer;
+        
+        // 单选/判断：完全匹配给满分，否则0分
+        if ("single".equals(qType) || "single_choice".equals(qType)
+                || "judge".equals(qType) || "true_false".equals(qType)) {
+            return correct.trim().equalsIgnoreCase(answer.trim()) ? fullScore : BigDecimal.ZERO;
         }
         
-        String correctAnswer = question.getCorrectAnswer().trim();
-        studentAnswer = studentAnswer.trim();
-        
-        // 多选题需要排序后比较
-        if ("multiple".equals(question.getType())) {
-            char[] correctChars = correctAnswer.toCharArray();
-            char[] studentChars = studentAnswer.toCharArray();
-            Arrays.sort(correctChars);
-            Arrays.sort(studentChars);
-            return Arrays.equals(correctChars, studentChars);
+        // 多选：
+        // - 任一错误选项（不在正确集合中）→ 0分
+        // - 选中了正确集合的非空子集（不全）→ 0.5×满分
+        // - 全部正确且不多选 → 满分
+        if ("multiple".equals(qType) || "multiple_choice".equals(qType)) {
+            Set<String> correctSet = normalizeOptionSet(correct);
+            Set<String> studentSet = normalizeOptionSet(answer);
+            if (studentSet.isEmpty()) {
+                return BigDecimal.ZERO;
+            }
+            // 有任何不在正确集合的选项 → 0分
+            for (String s : studentSet) {
+                if (!correctSet.contains(s)) {
+                    return BigDecimal.ZERO;
+                }
+            }
+            // 全部命中
+            if (studentSet.equals(correctSet)) {
+                return fullScore;
+            }
+            // 正确子集，给一半分
+            return fullScore.multiply(new BigDecimal("0.5")).setScale(2, RoundingMode.HALF_UP);
         }
         
-        // 单选题和判断题直接比较
-        return correctAnswer.equalsIgnoreCase(studentAnswer);
+        return BigDecimal.ZERO;
+    }
+
+    private Set<String> normalizeOptionSet(String raw) {
+        if (raw == null) return Collections.emptySet();
+        String cleaned = raw.trim().toUpperCase().replaceAll("[^A-Z,]", "");
+        // 支持“ACD”或“A,C,D”两种形式
+        Set<String> set = new HashSet<>();
+        if (cleaned.contains(",")) {
+            for (String part : cleaned.split(",")) {
+                if (!part.isEmpty()) set.add(part);
+            }
+        } else {
+            for (char c : cleaned.toCharArray()) {
+                if (c >= 'A' && c <= 'Z') set.add(String.valueOf(c));
+            }
+        }
+        return set;
     }
 
     /**
@@ -201,8 +240,11 @@ public class GradingService {
         
         for (ExamQuestion eq : examQuestions) {
             Question question = questionMapper.selectById(eq.getQuestionId());
-            if (question != null && "subjective".equals(question.getType())) {
-                return true;
+            if (question != null) {
+                String t = question.getType() == null ? "" : question.getType().trim().toLowerCase();
+                if ("subjective".equals(t) || "essay".equals(t)) {
+                    return true;
+                }
             }
         }
         
@@ -251,8 +293,11 @@ public class GradingService {
             int subjectiveCount = 0;
             for (ExamQuestion eq : examQuestions) {
                 Question question = questionMapper.selectById(eq.getQuestionId());
-                if (question != null && "subjective".equals(question.getType())) {
-                    subjectiveCount++;
+                if (question != null) {
+                    String t = question.getType() == null ? "" : question.getType().trim().toLowerCase();
+                    if ("subjective".equals(t) || "essay".equals(t)) {
+                        subjectiveCount++;
+                    }
                 }
             }
             vo.setSubjectiveQuestionCount(subjectiveCount);
@@ -297,7 +342,11 @@ public class GradingService {
         for (ExamQuestion eq : examQuestions) {
             Question question = questionMapper.selectById(eq.getQuestionId());
             
-            if (question == null || !"subjective".equals(question.getType())) {
+            if (question == null) {
+                continue;
+            }
+            String t = question.getType() == null ? "" : question.getType().trim().toLowerCase();
+            if (!("subjective".equals(t) || "essay".equals(t))) {
                 continue;
             }
             
@@ -427,16 +476,31 @@ public class GradingService {
      * 计算排名
      */
     private void calculateRanking(Long examId) {
-        QueryWrapper<Score> wrapper = new QueryWrapper<>();
-        wrapper.eq("exam_id", examId)
-               .orderByDesc("total_score");
-        
-        List<Score> scores = scoreMapper.selectList(wrapper);
-        
+        // 总排名（所有班级）
+        QueryWrapper<Score> overallWrapper = new QueryWrapper<>();
+        overallWrapper.eq("exam_id", examId)
+                      .orderByDesc("total_score");
+        List<Score> allScores = scoreMapper.selectList(overallWrapper);
         int rank = 1;
-        for (Score score : scores) {
-            score.setRank(rank++);
-            scoreMapper.updateById(score);
+        for (Score s : allScores) {
+            s.setRank(rank++);
+            scoreMapper.updateById(s);
+        }
+
+        // 班级内排名（按 class_id 分组）
+        Map<Long, List<Score>> classToScores = new HashMap<>();
+        for (Score s : allScores) {
+            if (s.getClassId() == null) continue;
+            classToScores.computeIfAbsent(s.getClassId(), k -> new ArrayList<>()).add(s);
+        }
+        for (Map.Entry<Long, List<Score>> entry : classToScores.entrySet()) {
+            List<Score> classScores = entry.getValue();
+            // 已经按总分降序排列，无需再次排序
+            int classRank = 1;
+            for (Score s : classScores) {
+                s.setClassRank(classRank++);
+                scoreMapper.updateById(s);
+            }
         }
     }
 }

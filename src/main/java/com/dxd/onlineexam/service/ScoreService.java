@@ -6,6 +6,8 @@ import com.dxd.onlineexam.mapper.*;
 import com.dxd.onlineexam.vo.ScoreDetailVO;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
+
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -28,59 +30,130 @@ public class ScoreService {
      * 获取成绩列表
      */
     public List<Map<String, Object>> getScoreList(Long examId, Long classId, String status) {
-        QueryWrapper<Score> wrapper = new QueryWrapper<>();
-        
-        if (examId != null) {
-            wrapper.eq("exam_id", examId);
-        }
-        
-        if (classId != null) {
-            wrapper.eq("class_id", classId);
-        }
-        
-        if ("graded".equals(status)) {
-            wrapper.isNotNull("total_score");
-        } else if ("pending".equals(status)) {
-            wrapper.isNull("total_score");
-        }
-        
-        wrapper.orderByDesc("create_time");
-        List<Score> scores = scoreMapper.selectList(wrapper);
-        
-        return scores.stream().map(score -> {
-            Map<String, Object> map = new HashMap<>();
-            
-            map.put("scoreId", score.getScoreId());
-            map.put("studentId", score.getStudentId());
-            
-            // 获取学生信息
-            User student = userMapper.selectById(score.getStudentId());
-            map.put("studentName", student != null ? student.getRealName() : "");
-            
-            // 获取考试信息
-            Exam exam = examMapper.selectById(score.getExamId());
-            map.put("examName", exam != null ? exam.getExamName() : "");
-            
-            // 获取班级信息
-            if (score.getClassId() != null) {
-                com.dxd.onlineexam.entity.Class clazz = classMapper.selectById(score.getClassId());
-                map.put("className", clazz != null ? clazz.getClassName() : "");
+        List<Map<String, Object>> result = new ArrayList<>();
+
+        // 1) 已批改（graded）- 直接来自 score 表
+        if (status == null || "graded".equals(status)) {
+            QueryWrapper<Score> gradedWrapper = new QueryWrapper<>();
+            if (examId != null) gradedWrapper.eq("exam_id", examId);
+            if (classId != null) gradedWrapper.eq("class_id", classId);
+            gradedWrapper.isNotNull("total_score").orderByDesc("create_time");
+            List<Score> graded = scoreMapper.selectList(gradedWrapper);
+            for (Score s : graded) {
+                Map<String, Object> map = new HashMap<>();
+                map.put("scoreId", s.getScoreId());
+                map.put("studentId", s.getStudentId());
+                User stu = userMapper.selectById(s.getStudentId());
+                map.put("studentName", stu != null ? stu.getRealName() : "");
+                Exam ex = examMapper.selectById(s.getExamId());
+                map.put("examName", ex != null ? ex.getExamName() : "");
+                if (s.getClassId() != null) {
+                    com.dxd.onlineexam.entity.Class clazz = classMapper.selectById(s.getClassId());
+                    map.put("className", clazz != null ? clazz.getClassName() : "");
+                } else {
+                    map.put("className", "");
+                }
+                map.put("objectiveScore", s.getObjectiveScore());
+                map.put("subjectiveScore", s.getSubjectiveScore());
+                map.put("totalScore", s.getTotalScore());
+                map.put("rank", s.getRank());
+                map.put("isGraded", true);
+                // 提交时间
+                PaperInstance pi = paperInstanceMapper.selectById(s.getPaperInstanceId());
+                map.put("submitTime", pi != null ? pi.getSubmitTime() : null);
+                map.put("status", "graded");
+                result.add(map);
             }
-            
-            map.put("objectiveScore", score.getObjectiveScore());
-            map.put("subjectiveScore", score.getSubjectiveScore());
-            map.put("totalScore", score.getTotalScore());
-            map.put("rank", score.getRank());
-            map.put("isGraded", score.getTotalScore() != null);
-            
-            // 获取提交时间
-            QueryWrapper<PaperInstance> piWrapper = new QueryWrapper<>();
-            piWrapper.eq("paper_instance_id", score.getPaperInstanceId());
-            PaperInstance paperInstance = paperInstanceMapper.selectOne(piWrapper);
-            map.put("submitTime", paperInstance != null ? paperInstance.getSubmitTime() : null);
-            
-            return map;
-        }).collect(Collectors.toList());
+        }
+
+        // 2) 部分批改（partial）- paper_instance 提交、客观题已判、未总评
+        if (status == null || "partial".equals(status)) {
+            QueryWrapper<PaperInstance> partialWrapper = new QueryWrapper<>();
+            partialWrapper.eq("status", "submitted")
+                    .isNotNull("objective_score")
+                    .eq("is_graded", 0);
+            if (examId != null) partialWrapper.eq("exam_id", examId);
+            List<PaperInstance> partial = paperInstanceMapper.selectList(partialWrapper);
+            for (PaperInstance pi : partial) {
+                User stu = userMapper.selectById(pi.getStudentId());
+                Exam ex = examMapper.selectById(pi.getExamId());
+                Map<String, Object> map = new HashMap<>();
+                map.put("scoreId", null);
+                map.put("studentId", pi.getStudentId());
+                map.put("studentName", stu != null ? stu.getRealName() : "");
+                map.put("examName", ex != null ? ex.getExamName() : "");
+                // 班级
+                if (stu != null && stu.getClassId() != null) {
+                    com.dxd.onlineexam.entity.Class clazz = classMapper.selectById(stu.getClassId());
+                    if (classId != null && !classId.equals(stu.getClassId())) {
+                        continue; // 班级过滤
+                    }
+                    map.put("className", clazz != null ? clazz.getClassName() : "");
+                } else {
+                    if (classId != null) continue;
+                    map.put("className", "");
+                }
+                map.put("objectiveScore", pi.getObjectiveScore());
+                map.put("subjectiveScore", null);
+                map.put("totalScore", null);
+                map.put("rank", null);
+                map.put("isGraded", false);
+                map.put("submitTime", pi.getSubmitTime());
+                map.put("status", "partial");
+                result.add(map);
+            }
+        }
+
+        // 3) 待批改（pending）- paper_instance 提交、客观题未判
+        if (status == null || "pending".equals(status)) {
+            QueryWrapper<PaperInstance> pendingWrapper = new QueryWrapper<>();
+            pendingWrapper.eq("status", "submitted")
+                    .isNull("objective_score");
+            if (examId != null) pendingWrapper.eq("exam_id", examId);
+            List<PaperInstance> pending = paperInstanceMapper.selectList(pendingWrapper);
+            for (PaperInstance pi : pending) {
+                User stu = userMapper.selectById(pi.getStudentId());
+                Exam ex = examMapper.selectById(pi.getExamId());
+                Map<String, Object> map = new HashMap<>();
+                map.put("scoreId", null);
+                map.put("studentId", pi.getStudentId());
+                map.put("studentName", stu != null ? stu.getRealName() : "");
+                map.put("examName", ex != null ? ex.getExamName() : "");
+                if (stu != null && stu.getClassId() != null) {
+                    com.dxd.onlineexam.entity.Class clazz = classMapper.selectById(stu.getClassId());
+                    if (classId != null && !classId.equals(stu.getClassId())) {
+                        continue;
+                    }
+                    map.put("className", clazz != null ? clazz.getClassName() : "");
+                } else {
+                    if (classId != null) continue;
+                    map.put("className", "");
+                }
+                map.put("objectiveScore", null);
+                map.put("subjectiveScore", null);
+                map.put("totalScore", null);
+                map.put("rank", null);
+                map.put("isGraded", false);
+                map.put("submitTime", pi.getSubmitTime());
+                map.put("status", "pending");
+                result.add(map);
+            }
+        }
+
+        // 默认按提交时间降序、已批改在前
+        result.sort((a, b) -> {
+            boolean ag = "graded".equals(a.get("status"));
+            boolean bg = "graded".equals(b.get("status"));
+            if (ag != bg) return ag ? -1 : 1;
+            java.time.LocalDateTime at = (java.time.LocalDateTime) a.get("submitTime");
+            java.time.LocalDateTime bt = (java.time.LocalDateTime) b.get("submitTime");
+            if (at == null && bt == null) return 0;
+            if (at == null) return 1;
+            if (bt == null) return -1;
+            return bt.compareTo(at);
+        });
+
+        return result;
     }
 
     /**

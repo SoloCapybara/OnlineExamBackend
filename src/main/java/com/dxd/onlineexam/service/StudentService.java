@@ -10,6 +10,7 @@ import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import java.math.BigDecimal;
+import java.math.RoundingMode;
 import java.time.Duration;
 import java.time.LocalDateTime;
 import java.util.*;
@@ -159,10 +160,11 @@ public class StudentService {
                 scoreWrapper.eq("paper_instance_id", paper.getPaperInstanceId());
                 Score score = scoreMapper.selectOne(scoreWrapper);
                 if (score != null && score.getClassRank() != null) {
-                    // 获取班级总人数
-                    QueryWrapper<PaperInstance> countWrapper = new QueryWrapper<>();
-                    countWrapper.eq("exam_id", paper.getExamId());
-                    long totalStudents = paperInstanceMapper.selectCount(countWrapper);
+                    // 班级总人数（同一考试下同班级的成绩记录数）
+                    QueryWrapper<Score> classCountWrapper = new QueryWrapper<>();
+                    classCountWrapper.eq("exam_id", paper.getExamId())
+                                     .eq("class_id", score.getClassId());
+                    long totalStudents = scoreMapper.selectCount(classCountWrapper);
                     vo.setRank(score.getClassRank() + "/" + totalStudents);
                 }
             }
@@ -181,8 +183,11 @@ public class StudentService {
         
         for (ExamQuestion eq : examQuestions) {
             Question question = questionMapper.selectById(eq.getQuestionId());
-            if (question != null && "subjective".equals(question.getType())) {
-                return true;
+            if (question != null) {
+                String t = question.getType() == null ? "" : question.getType().trim().toLowerCase();
+                if ("subjective".equals(t) || "essay".equals(t)) {
+                    return true;
+                }
             }
         }
         
@@ -311,7 +316,11 @@ public class StudentService {
             qvo.setScore(eq.getScore());
             
             // 获取选项（非主观题）
-            if (!"subjective".equals(question.getType())) {
+            {
+                String t = question.getType() == null ? "" : question.getType().trim().toLowerCase();
+                if ("subjective".equals(t) || "essay".equals(t)) {
+                    // 主观题无选项
+                } else {
                 QueryWrapper<QuestionOption> optionWrapper = new QueryWrapper<>();
                 optionWrapper.eq("question_id", question.getQuestionId())
                            .orderByAsc("sort_order");
@@ -325,6 +334,7 @@ public class StudentService {
                 }).collect(Collectors.toList());
                 
                 qvo.setOptions(optionVOs);
+                }
             }
             
             return qvo;
@@ -412,43 +422,24 @@ public class StudentService {
             }
         }
         
-        // 自动批改客观题
-        BigDecimal objectiveScore = autoGradeObjectiveQuestions(request.getPaperInstanceId());
-        
-        // 检查考试是否有主观题
+        // 仅提交：不做任何判分，分数字段置空，等待教师端自动/人工判卷
         boolean hasSubjective = hasSubjectiveQuestions(paperInstance.getExamId());
-        
-        // 更新试卷实例状态
+
         paperInstance.setStatus("submitted");
         paperInstance.setSubmitTime(now);
-        paperInstance.setObjectiveScore(objectiveScore);
+        paperInstance.setObjectiveScore(null);
+        paperInstance.setSubjectiveScore(null);
+        paperInstance.setTotalScore(null);
+        paperInstance.setIsGraded(0);
         paperInstance.setUpdateTime(now);
-        
-        BigDecimal totalScore = objectiveScore;
-        
-        if (!hasSubjective) {
-            // 没有主观题，直接完成批改
-            paperInstance.setSubjectiveScore(BigDecimal.ZERO);
-            paperInstance.setTotalScore(objectiveScore);
-            paperInstance.setIsGraded(1);
-            totalScore = objectiveScore;
-            
-            // 创建成绩记录
-            createScoreRecord(paperInstance);
-        } else {
-            // 有主观题，等待教师批改
-            paperInstance.setIsGraded(0);
-            totalScore = null;
-        }
-        
         paperInstanceMapper.updateById(paperInstance);
-        
+
         Map<String, Object> result = new HashMap<>();
         result.put("submitTime", now);
-        result.put("objectiveScore", objectiveScore);
-        result.put("totalScore", totalScore);
+        result.put("objectiveScore", null);
+        result.put("totalScore", null);
         result.put("hasSubjective", hasSubjective);
-        
+
         return result;
     }
 
@@ -468,7 +459,7 @@ public class StudentService {
             Question question = questionMapper.selectById(record.getQuestionId());
             
             // 只批改客观题
-            if ("subjective".equals(question.getType())) {
+            if ("subjective".equalsIgnoreCase(question.getType())) {
                 continue;
             }
             
@@ -482,14 +473,11 @@ public class StudentService {
                 continue;
             }
             
-            // 判断答案是否正确
-            boolean isCorrect = checkAnswer(question, record.getStudentAnswer());
-            
-            BigDecimal actualScore = isCorrect ? examQuestion.getScore() : BigDecimal.ZERO;
+            BigDecimal actualScore = computeObjectiveScore(question, record.getStudentAnswer(), examQuestion.getScore());
             totalScore = totalScore.add(actualScore);
             
             // 更新答题记录
-            record.setIsCorrect(isCorrect ? 1 : 0);
+            record.setIsCorrect(actualScore != null && actualScore.compareTo(examQuestion.getScore()) == 0 ? 1 : 0);
             record.setActualScore(actualScore);
             record.setUpdateTime(LocalDateTime.now());
             answerRecordMapper.updateById(record);
@@ -501,25 +489,54 @@ public class StudentService {
     /**
      * 检查答案是否正确
      */
-    private boolean checkAnswer(Question question, String studentAnswer) {
-        if (studentAnswer == null || question.getCorrectAnswer() == null) {
-            return false;
+    private BigDecimal computeObjectiveScore(Question question, String studentAnswer, BigDecimal fullScore) {
+        if (question == null || fullScore == null || fullScore.compareTo(BigDecimal.ZERO) <= 0) {
+            return BigDecimal.ZERO;
         }
-        
-        String correctAnswer = question.getCorrectAnswer().trim();
-        studentAnswer = studentAnswer.trim();
-        
-        // 多选题需要排序后比较
-        if ("multiple".equals(question.getType())) {
-            char[] correctChars = correctAnswer.toCharArray();
-            char[] studentChars = studentAnswer.toCharArray();
-            Arrays.sort(correctChars);
-            Arrays.sort(studentChars);
-            return Arrays.equals(correctChars, studentChars);
+        String qType = question.getType() == null ? "" : question.getType().trim().toLowerCase();
+        String correct = question.getCorrectAnswer();
+        if (correct == null || correct.trim().isEmpty()) {
+            return BigDecimal.ZERO;
         }
+        String answer = studentAnswer == null ? "" : studentAnswer;
         
-        // 单选题和判断题直接比较
-        return correctAnswer.equalsIgnoreCase(studentAnswer);
+        if ("single".equals(qType) || "single_choice".equals(qType)
+                || "judge".equals(qType) || "true_false".equals(qType)) {
+            return correct.trim().equalsIgnoreCase(answer.trim()) ? fullScore : BigDecimal.ZERO;
+        }
+        if ("multiple".equals(qType) || "multiple_choice".equals(qType)) {
+            Set<String> correctSet = normalizeOptionSet(correct);
+            Set<String> studentSet = normalizeOptionSet(answer);
+            if (studentSet.isEmpty()) {
+                return BigDecimal.ZERO;
+            }
+            for (String s : studentSet) {
+                if (!correctSet.contains(s)) {
+                    return BigDecimal.ZERO;
+                }
+            }
+            if (studentSet.equals(correctSet)) {
+                return fullScore;
+            }
+            return fullScore.multiply(new BigDecimal("0.5")).setScale(2, RoundingMode.HALF_UP);
+        }
+        return BigDecimal.ZERO;
+    }
+
+    private Set<String> normalizeOptionSet(String raw) {
+        if (raw == null) return Collections.emptySet();
+        String cleaned = raw.trim().toUpperCase().replaceAll("[^A-Z,]", "");
+        Set<String> set = new HashSet<>();
+        if (cleaned.contains(",")) {
+            for (String part : cleaned.split(",")) {
+                if (!part.isEmpty()) set.add(part);
+            }
+        } else {
+            for (char c : cleaned.toCharArray()) {
+                if (c >= 'A' && c <= 'Z') set.add(String.valueOf(c));
+            }
+        }
+        return set;
     }
 
     /**
@@ -548,7 +565,10 @@ public class StudentService {
             paperInstance.getSubmitTime().toLocalDate().toString() : "");
         vo.setObjectiveScore(paperInstance.getObjectiveScore());
         vo.setSubjectiveScore(paperInstance.getSubjectiveScore());
-        vo.setTotalScore(paperInstance.getTotalScore());
+        // 仅在已批改时返回总分
+        vo.setTotalScore(paperInstance.getIsGraded() != null && paperInstance.getIsGraded() == 1
+                ? paperInstance.getTotalScore()
+                : null);
         vo.setSubmitTime(paperInstance.getSubmitTime());
         
         // 获取排名
@@ -556,13 +576,13 @@ public class StudentService {
         scoreWrapper.eq("paper_instance_id", paperInstance.getPaperInstanceId());
         Score score = scoreMapper.selectOne(scoreWrapper);
         
-        if (score != null && score.getRank() != null) {
-            vo.setRank(score.getRank());
+        if (paperInstance.getIsGraded() != null && paperInstance.getIsGraded() == 1 && score != null) {
+            if (score.getRank() != null) vo.setRank(score.getRank());
             vo.setClassRank(score.getClassRank());
-            
-            // 获取总人数
+            // 班级总人数：同一考试下该班级有成绩记录的人数
             QueryWrapper<Score> countWrapper = new QueryWrapper<>();
-            countWrapper.eq("exam_id", examId);
+            countWrapper.eq("exam_id", examId)
+                        .eq("class_id", score.getClassId());
             int totalStudents = Math.toIntExact(scoreMapper.selectCount(countWrapper));
             vo.setTotalStudents(totalStudents);
         }
@@ -635,12 +655,26 @@ public class StudentService {
      * 获取题目类型名称
      */
     private String getTypeName(String type) {
-        switch (type) {
-            case "single": return "单选题";
-            case "multiple": return "多选题";
-            case "judge": return "判断题";
-            case "subjective": return "主观题";
-            default: return "未知类型";
+        if (type == null) {
+            return "未知类型";
+        }
+        String t = type.trim().toLowerCase();
+        switch (t) {
+            // 兼容旧枚举
+            case "single":
+            case "single_choice":
+                return "单选题";
+            case "multiple":
+            case "multiple_choice":
+                return "多选题";
+            case "judge":
+            case "true_false":
+                return "判断题";
+            case "subjective":
+            case "essay":
+                return "主观题";
+            default:
+                return "未知类型";
         }
     }
     
