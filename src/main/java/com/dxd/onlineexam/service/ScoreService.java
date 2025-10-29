@@ -25,6 +25,7 @@ public class ScoreService {
     private final AnswerRecordMapper answerRecordMapper;
     private final ExamQuestionMapper examQuestionMapper;
     private final QuestionMapper questionMapper;
+    private final QuestionOptionMapper questionOptionMapper;
 
     /**
      * 获取成绩列表
@@ -209,7 +210,24 @@ public class ScoreService {
             detail.setQuestionNumber(eq.getQuestionNumber());
             detail.setQuestionContent(question.getContent());
             detail.setQuestionType(question.getType());
-            detail.setScore(eq.getScore());
+            detail.setScore(answerRecord != null && answerRecord.getActualScore() != null ? answerRecord.getActualScore() : null);
+            detail.setMaxScore(eq.getScore());
+            // 类型中文名
+            String t = question.getType() == null ? "" : question.getType().trim().toLowerCase();
+            String typeName;
+            switch (t) {
+                case "single":
+                case "single_choice": typeName = "单选题"; break;
+                case "multiple":
+                case "multiple_choice": typeName = "多选题"; break;
+                case "judge":
+                case "true_false": typeName = "判断题"; break;
+                case "subjective":
+                case "essay": typeName = "主观题"; break;
+                default: typeName = "未知类型";
+            }
+            // 兼容字段
+            try { com.dxd.onlineexam.vo.ScoreDetailVO.QuestionDetail.class.getDeclaredField("typeName"); detail.setTypeName(typeName); } catch (Exception ignore) {}
             
             if (answerRecord != null) {
                 detail.setStudentAnswer(answerRecord.getStudentAnswer());
@@ -219,6 +237,23 @@ public class ScoreService {
             }
             
             detail.setCorrectAnswer(question.getCorrectAnswer());
+            detail.setAnalysis(question.getAnalysis());
+            if ("subjective".equals(t) || "essay".equals(t)) {
+                detail.setReferenceAnswer(question.getReferenceAnswer());
+            } else {
+                // 选项（客观题）
+                QueryWrapper<QuestionOption> optionWrapper = new QueryWrapper<>();
+                optionWrapper.eq("question_id", question.getQuestionId())
+                           .orderByAsc("sort_order");
+                List<QuestionOption> options = questionOptionMapper.selectList(optionWrapper);
+                List<ScoreDetailVO.QuestionDetail.OptionDetail> optionDetails = options.stream().map(op -> {
+                    ScoreDetailVO.QuestionDetail.OptionDetail od = new ScoreDetailVO.QuestionDetail.OptionDetail();
+                    od.setLabel(op.getOptionLabel());
+                    od.setContent(op.getContent());
+                    return od;
+                }).collect(java.util.stream.Collectors.toList());
+                detail.setOptions(optionDetails);
+            }
             
             return detail;
         }).collect(Collectors.toList());

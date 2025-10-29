@@ -1,3 +1,67 @@
+# 后端服务（Spring Boot）
+
+## 项目简介
+在线考试系统后端，基于 Spring Boot + MyBatis-Plus + MySQL。
+
+## 运行环境
+- JDK 17+
+- Maven 3.8+
+- MySQL 8.0+
+
+## 数据库初始化
+1. 使用 `online_exam_complete.sql` 初始化全量结构与示例数据（推荐）。
+2. 如仅需修复表结构，可参考 `check_and_fix_database.sql`。
+
+## 配置说明
+修改 `src/main/resources/application.properties` 中数据库连接：
+```
+spring.datasource.url=jdbc:mysql://localhost:3306/online_exam?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai
+spring.datasource.username=root
+spring.datasource.password=你的密码
+```
+
+## 启动
+```
+./mvnw spring-boot:run
+```
+启动后默认地址：`http://localhost:8080/api`
+
+## 主要模块与规则
+- 认证与会话：基础 JWT 验证（见 `AuthController`）。
+- 题库：教师可增删改查题目（支持主观/客观题），多选题答案统一按字母排序标准化。
+- 判卷：
+  - 自动判卷：仅批改客观题；多选题评分规则为“全对满分、包含错误选项 0 分、仅为正确子集（非空且无多选）得一半分”。
+  - 主观题批改：教师录入得分与评语，提交后合并客观分生成总分，并写入 `score` 表。
+- 排名：生成或更新 `score` 记录后进行排名计算（总排名与班级排名）。
+- 成绩统计（StatisticsService）：
+  - 参与人数、已提交人数
+  - 平均/最高/最低分
+  - 及格率：`total_score >= passing_score`
+  - 优秀率：`total_score >= exam.total_score * 0.9`（如需调整，可将 0.9 抽为配置）
+  - 分数段分布与题目分析（正确率/平均分）
+
+## 接口总览
+- 学生端：`/student/**`
+- 教师端：`/teacher/**`
+- 公共：`/common/**`
+
+示例：
+- 成绩统计：`GET /teacher/statistics/exam/{examId}`
+- 成绩详情：`GET /teacher/scores/{scoreId}`（已返回参考答案、解析、typeName、maxScore、options）
+
+## 常见问题
+1) 提交后总分始终为 null？
+   - 说明未完成“主观题批改”或“合并总分”。完成批改并提交后会写入 `score.total_score`。
+
+2) 题库导入出现重复？
+   - 已在 `TeacherService.addQuestion` 增加“内容+类型+标准化答案”的查重，重复将抛异常。
+
+3) 优秀率始终为 0？
+   - 仅统计 `score.total_score` 非空的记录（完全批改）。请确认是否已批改并生成总分。
+
+## 账号
+初始化脚本包含默认测试账号，详见 `online_exam_complete.sql` 尾部注释。
+
 # 在线考试系统 - 后端 API
 
 ## 项目说明
