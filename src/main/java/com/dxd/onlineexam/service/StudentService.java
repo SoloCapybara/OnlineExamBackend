@@ -63,7 +63,8 @@ public class StudentService {
      */
     public List<ExamVO> getExamList(Long studentId) {
         QueryWrapper<Exam> wrapper = new QueryWrapper<>();
-        wrapper.eq("status", "published")
+        // 学生端仅显示已发布的非草稿考试（pending/ongoing/finished）
+        wrapper.ne("status", "draft")
                .orderByDesc("start_time");
         
         List<Exam> exams = examMapper.selectList(wrapper);
@@ -82,7 +83,7 @@ public class StudentService {
             if (now.isBefore(exam.getStartTime())) {
                 vo.setStatus("pending");
             } else if (now.isAfter(exam.getEndTime())) {
-                vo.setStatus("completed");
+                vo.setStatus("finished");
             } else {
                 vo.setStatus("ongoing");
             }

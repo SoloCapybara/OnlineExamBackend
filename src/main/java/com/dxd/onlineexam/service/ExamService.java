@@ -24,6 +24,8 @@ public class ExamService {
     private final QuestionMapper questionMapper;
     private final PaperInstanceMapper paperInstanceMapper;
     private final QuestionOptionMapper questionOptionMapper;
+    private final SubjectMapper subjectMapper;
+    private final ExamClassMapper examClassMapper;
 
     /**
      * 获取考试列表
@@ -38,7 +40,17 @@ public class ExamService {
         wrapper.orderByDesc("create_time");
         List<Exam> exams = examMapper.selectList(wrapper);
         
+        LocalDateTime now = LocalDateTime.now();
+        
         return exams.stream().map(exam -> {
+            // 动态计算并更新考试状态
+            String actualStatus = calculateExamStatus(exam, now);
+            if (!actualStatus.equals(exam.getStatus())) {
+                exam.setStatus(actualStatus);
+                exam.setUpdateTime(now);
+                examMapper.updateById(exam);
+            }
+            
             ExamListVO vo = new ExamListVO();
             vo.setExamId(exam.getExamId());
             vo.setExamName(exam.getExamName());
@@ -46,7 +58,7 @@ public class ExamService {
             vo.setEndTime(exam.getEndTime());
             vo.setDuration(exam.getDuration());
             vo.setTotalScore(exam.getTotalScore());
-            vo.setStatus(exam.getStatus());
+            vo.setStatus(actualStatus);
             vo.setCreateTime(exam.getCreateTime());
             
             // 统计参与人数
@@ -72,6 +84,37 @@ public class ExamService {
             return vo;
         }).collect(Collectors.toList());
     }
+    
+    /**
+     * 根据时间动态计算考试状态
+     */
+    private String calculateExamStatus(Exam exam, LocalDateTime now) {
+        String currentStatus = exam.getStatus();
+        
+        // 草稿状态不自动改变
+        if ("draft".equals(currentStatus)) {
+            return "draft";
+        }
+        
+        // 添加调试日志
+        System.out.println("计算考试状态 - 考试ID: " + exam.getExamId() + ", 名称: " + exam.getExamName());
+        System.out.println("  当前时间: " + now);
+        System.out.println("  开始时间: " + exam.getStartTime());
+        System.out.println("  结束时间: " + exam.getEndTime());
+        
+        // 已发布、未开始、进行中、已结束状态都根据时间判断
+        // （兼容旧的published状态）
+        if (now.isBefore(exam.getStartTime())) {
+            System.out.println("  -> 未开始");
+            return "pending";  // 未开始
+        } else if (now.isAfter(exam.getEndTime())) {
+            System.out.println("  -> 已结束");
+            return "finished"; // 已结束
+        } else {
+            System.out.println("  -> 进行中");
+            return "ongoing";  // 进行中
+        }
+    }
 
     /**
      * 获取考试详情
@@ -86,6 +129,16 @@ public class ExamService {
         vo.setExamId(exam.getExamId());
         vo.setExamName(exam.getExamName());
         vo.setDescription(exam.getDescription());
+        vo.setSubjectId(exam.getSubjectId());
+        
+        // 查询科目名称
+        if (exam.getSubjectId() != null) {
+            Subject subject = subjectMapper.selectById(exam.getSubjectId());
+            if (subject != null) {
+                vo.setSubjectName(subject.getSubjectName());
+            }
+        }
+        
         vo.setStartTime(exam.getStartTime());
         vo.setEndTime(exam.getEndTime());
         vo.setDuration(exam.getDuration());
@@ -93,6 +146,48 @@ public class ExamService {
         vo.setPassingScore(exam.getPassingScore());
         vo.setQuestionCount(exam.getQuestionCount());
         vo.setStatus(exam.getStatus());
+        
+        // 查询班级IDs
+        QueryWrapper<ExamClass> ecWrapper = new QueryWrapper<>();
+        ecWrapper.eq("exam_id", examId);
+        List<ExamClass> examClasses = examClassMapper.selectList(ecWrapper);
+        List<Long> classIds = examClasses.stream()
+                .map(ExamClass::getClassId)
+                .collect(Collectors.toList());
+        vo.setClassIds(classIds);
+        
+        // 查询题目列表
+        QueryWrapper<ExamQuestion> eqWrapper = new QueryWrapper<>();
+        eqWrapper.eq("exam_id", examId).orderByAsc("question_number");
+        List<ExamQuestion> examQuestions = examQuestionMapper.selectList(eqWrapper);
+        
+        List<QuestionVO> questionVOs = examQuestions.stream().map(eq -> {
+            Question question = questionMapper.selectById(eq.getQuestionId());
+            if (question == null) {
+                return null;
+            }
+            
+            QuestionVO qvo = new QuestionVO();
+            qvo.setQuestionId(question.getQuestionId());
+            qvo.setContent(question.getContent());
+            qvo.setType(question.getType());
+            qvo.setScore(eq.getScore());
+            
+            // 设置类型名称
+            String typeName = "";
+            switch (question.getType()) {
+                case "single_choice": typeName = "单选题"; break;
+                case "multiple_choice": typeName = "多选题"; break;
+                case "true_false": typeName = "判断题"; break;
+                case "essay": typeName = "主观题"; break;
+                default: typeName = question.getType();
+            }
+            qvo.setTypeName(typeName);
+            
+            return qvo;
+        }).filter(q -> q != null).collect(Collectors.toList());
+        
+        vo.setQuestions(questionVOs);
         
         return vo;
     }
@@ -163,6 +258,16 @@ public class ExamService {
             if (question != null) {
                 question.setUseCount(question.getUseCount() + 1);
                 questionMapper.updateById(question);
+            }
+        }
+        
+        // 关联班级
+        if (request.getTargetClassIds() != null && !request.getTargetClassIds().isEmpty()) {
+            for (Long classId : request.getTargetClassIds()) {
+                ExamClass examClass = new ExamClass();
+                examClass.setExamId(exam.getExamId());
+                examClass.setClassId(classId);
+                examClassMapper.insert(examClass);
             }
         }
         
@@ -238,6 +343,21 @@ public class ExamService {
             examQuestion.setScore(score);
             examQuestionMapper.insert(examQuestion);
         }
+        
+        // 删除旧的班级关联
+        QueryWrapper<ExamClass> deleteClassWrapper = new QueryWrapper<>();
+        deleteClassWrapper.eq("exam_id", examId);
+        examClassMapper.delete(deleteClassWrapper);
+        
+        // 重新关联班级
+        if (request.getTargetClassIds() != null && !request.getTargetClassIds().isEmpty()) {
+            for (Long classId : request.getTargetClassIds()) {
+                ExamClass examClass = new ExamClass();
+                examClass.setExamId(examId);
+                examClass.setClassId(classId);
+                examClassMapper.insert(examClass);
+            }
+        }
     }
 
     /**
@@ -271,8 +391,36 @@ public class ExamService {
             throw new RuntimeException("考试不存在");
         }
         
-        exam.setStatus("published");
-        exam.setUpdateTime(LocalDateTime.now());
+        LocalDateTime now = LocalDateTime.now();
+        
+        // 添加调试日志
+        System.out.println("=== 发布考试状态判断 ===");
+        System.out.println("考试ID: " + examId);
+        System.out.println("考试名称: " + exam.getExamName());
+        System.out.println("当前时间: " + now);
+        System.out.println("开始时间: " + exam.getStartTime());
+        System.out.println("结束时间: " + exam.getEndTime());
+        System.out.println("now.isBefore(startTime): " + now.isBefore(exam.getStartTime()));
+        System.out.println("now.isAfter(endTime): " + now.isAfter(exam.getEndTime()));
+        System.out.println("now.isBefore(endTime): " + now.isBefore(exam.getEndTime()));
+        
+        // 发布时根据时间设置正确的状态
+        String status;
+        if (now.isBefore(exam.getStartTime())) {
+            status = "pending";  // 未开始
+            System.out.println("判断结果: 未开始");
+        } else if (now.isAfter(exam.getEndTime())) {
+            status = "finished"; // 已结束
+            System.out.println("判断结果: 已结束");
+        } else {
+            status = "ongoing";  // 进行中
+            System.out.println("判断结果: 进行中");
+        }
+        System.out.println("最终状态: " + status);
+        System.out.println("======================");
+        
+        exam.setStatus(status);
+        exam.setUpdateTime(now);
         examMapper.updateById(exam);
     }
 
