@@ -114,6 +114,7 @@ public class TeacherService {
         }).collect(Collectors.toList());
     }
 
+    //转换题目类型标签为中文
     private String getTypeName(String type) {
         switch (type) {
             case "single": return "单选题";
@@ -124,6 +125,7 @@ public class TeacherService {
         }
     }
 
+    //转换题目难度标签为中文
     private String getDifficultyName(String difficulty) {
         switch (difficulty) {
             case "easy": return "简单";

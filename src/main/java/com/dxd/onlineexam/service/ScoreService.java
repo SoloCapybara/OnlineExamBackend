@@ -143,15 +143,22 @@ public class ScoreService {
 
         // 默认按提交时间降序、已批改在前
         result.sort((a, b) -> {
-            boolean ag = "graded".equals(a.get("status"));
-            boolean bg = "graded".equals(b.get("status"));
+            // 规则1：先按状态排序（已批改的排在前面）
+            boolean ag = "graded".equals(a.get("status")); //a是否已批改
+            boolean bg = "graded".equals(b.get("status")); //b是否已批改
+            //状态不同:
+            //情形1，如果a是已批改，b是未批改，那么a是true，b是false，则ag ? -1 : 1 → true ? -1 : 1 → 返回 -1,结果是a 排在 b 前面
+            //情形2，如果a是未批改，b是已批改，那么a是false，b是true，则ag ? -1 : 1 → false ? -1 : 1 → 返回 1，结果是a 排在 b 后面
+            //状态相同:跳过，按照时间排序
             if (ag != bg) return ag ? -1 : 1;
-            java.time.LocalDateTime at = (java.time.LocalDateTime) a.get("submitTime");
-            java.time.LocalDateTime bt = (java.time.LocalDateTime) b.get("submitTime");
-            if (at == null && bt == null) return 0;
-            if (at == null) return 1;
-            if (bt == null) return -1;
-            return bt.compareTo(at);
+
+            // 规则2：状态相同的，按提交时间降序（最新的在前）
+            java.time.LocalDateTime at = (java.time.LocalDateTime) a.get("submitTime"); //a的提交时间
+            java.time.LocalDateTime bt = (java.time.LocalDateTime) b.get("submitTime"); //b的提交时间
+            if (at == null && bt == null) return 0; //两个时间都为null顺序不变
+            if (at == null) return 1; //a的时间为null，a排到后面
+            if (bt == null) return -1; //b的时间为null，b排到后面
+            return bt.compareTo(at); //如果 bt 在 at 之后 → 返回正数 → a 排在 b 后面，如果 bt 在 at 之前 → 返回负数 → a 排在 b 前面
         });
 
         return result;

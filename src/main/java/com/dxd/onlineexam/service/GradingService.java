@@ -213,10 +213,32 @@ public class GradingService {
         return BigDecimal.ZERO;
     }
 
+    /**
+     * 规范化选项集合
+     * 将字符串格式的选项转换为标准化的选项集合（Set）
+     * 
+     * @param raw 原始选项字符串，支持两种格式：
+     *            - 逗号分隔："A,C,D" 或 "A, C, D"
+     *            - 连续字符："ACD" 或 "acd"
+     * @return 规范化后的选项集合，每个选项都是大写字母（如 ["A", "C", "D"]）
+     *         如果输入为 null，返回空集合
+     * 
+     * 处理逻辑：
+     * 1. 去除空格，转换为大写
+     * 2. 移除所有非字母、非逗号的字符
+     * 3. 如果包含逗号，按逗号分割
+     * 4. 如果不包含逗号，按字符逐个解析（只保留 A-Z 的字母）
+     * 
+     * 示例：
+     * - "A,C,D" -> ["A", "C", "D"]
+     * - "ACD" -> ["A", "C", "D"]
+     * - "a, c, d" -> ["A", "C", "D"]
+     * - "A B C" -> ["A", "B", "C"]
+     */
     private Set<String> normalizeOptionSet(String raw) {
         if (raw == null) return Collections.emptySet();
         String cleaned = raw.trim().toUpperCase().replaceAll("[^A-Z,]", "");
-        // 支持“ACD”或“A,C,D”两种形式
+        // 支持"ACD"或"A,C,D"两种形式
         Set<String> set = new HashSet<>();
         if (cleaned.contains(",")) {
             for (String part : cleaned.split(",")) {
@@ -327,16 +349,18 @@ public class GradingService {
         vo.setExamName(exam != null ? exam.getExamName() : "");
         vo.setObjectiveScore(paperInstance.getObjectiveScore());
         
-        // 获取所有主观题及答案
+        // 获取本试卷实例所有题
         QueryWrapper<ExamQuestion> eqWrapper = new QueryWrapper<>();
         eqWrapper.eq("exam_id", paperInstance.getExamId())
                  .orderByAsc("question_number");
         List<ExamQuestion> examQuestions = examQuestionMapper.selectList(eqWrapper);
-        
+
+        //获取本试卷所有答题记录
         QueryWrapper<AnswerRecord> arWrapper = new QueryWrapper<>();
         arWrapper.eq("paper_instance_id", paperInstanceId);
         List<AnswerRecord> answerRecords = answerRecordMapper.selectList(arWrapper);
         
+        //所有主观题集合
         List<GradingDetailVO.SubjectiveQuestion> subjectiveQuestions = new ArrayList<>();
         
         for (ExamQuestion eq : examQuestions) {
@@ -353,22 +377,26 @@ public class GradingService {
             // 找到对应的答题记录
             AnswerRecord answerRecord = answerRecords.stream()
                     .filter(ar -> ar.getQuestionId().equals(eq.getQuestionId()))
-                    .findFirst()
-                    .orElse(null);
-            
+                    .findFirst() //找到第一个匹配的元素(从前到后处理)
+                    .orElse(null); //如果有值返回值，没有返回null
+
+            //答题详情对象
             GradingDetailVO.SubjectiveQuestion sq = new GradingDetailVO.SubjectiveQuestion();
+
             sq.setQuestionId(question.getQuestionId());
             sq.setQuestionNumber(eq.getQuestionNumber());
             sq.setContent(question.getContent());
             sq.setScore(eq.getScore());
             sq.setReferenceAnswer(question.getReferenceAnswer());
-            
+
+            //如果有答题记录就设置学生答案，实际分数，教师评语进详情对象
             if (answerRecord != null) {
                 sq.setStudentAnswer(answerRecord.getStudentAnswer());
                 sq.setActualScore(answerRecord.getActualScore());
                 sq.setComment(answerRecord.getTeacherComment());
             }
-            
+
+            //加入主观题集合
             subjectiveQuestions.add(sq);
         }
         

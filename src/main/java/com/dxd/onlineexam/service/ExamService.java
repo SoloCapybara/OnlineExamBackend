@@ -23,7 +23,6 @@ public class ExamService {
     private final ExamQuestionMapper examQuestionMapper;
     private final QuestionMapper questionMapper;
     private final PaperInstanceMapper paperInstanceMapper;
-    private final QuestionOptionMapper questionOptionMapper;
     private final SubjectMapper subjectMapper;
     private final ExamClassMapper examClassMapper;
 
@@ -424,44 +423,5 @@ public class ExamService {
         examMapper.updateById(exam);
     }
 
-    /**
-     * 获取考试题目列表（含选项）
-     */
-    public List<QuestionVO> getExamQuestions(Long examId) {
-        QueryWrapper<ExamQuestion> wrapper = new QueryWrapper<>();
-        wrapper.eq("exam_id", examId)
-               .orderByAsc("question_number");
-        List<ExamQuestion> examQuestions = examQuestionMapper.selectList(wrapper);
-        
-        return examQuestions.stream().map(eq -> {
-            Question question = questionMapper.selectById(eq.getQuestionId());
-            
-            QuestionVO vo = new QuestionVO();
-            vo.setQuestionId(question.getQuestionId());
-            vo.setQuestionCode(question.getQuestionCode());
-            vo.setContent(question.getContent());
-            vo.setType(question.getType());
-            vo.setScore(eq.getScore());
-            
-            // 获取选项
-            if (!"subjective".equals(question.getType())) {
-                QueryWrapper<QuestionOption> optionWrapper = new QueryWrapper<>();
-                optionWrapper.eq("question_id", question.getQuestionId())
-                           .orderByAsc("sort_order");
-                List<QuestionOption> options = questionOptionMapper.selectList(optionWrapper);
-                
-                List<QuestionVO.OptionVO> optionVOs = options.stream().map(option -> {
-                    QuestionVO.OptionVO optionVO = new QuestionVO.OptionVO();
-                    optionVO.setOptionId(option.getOptionLabel());
-                    optionVO.setContent(option.getContent());
-                    return optionVO;
-                }).collect(Collectors.toList());
-                
-                vo.setOptions(optionVOs);
-            }
-            
-            return vo;
-        }).collect(Collectors.toList());
-    }
 }
 

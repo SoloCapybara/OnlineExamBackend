@@ -233,18 +233,20 @@ public class StatisticsService {
         // 按班级分组
         Map<Long, List<Score>> scoresByClass = scores.stream()
                 .collect(Collectors.groupingBy(Score::getClassId));
-        
+
+        //总的统计结果集合，用于返回
         List<Map<String, Object>> result = new ArrayList<>();
         
         for (Map.Entry<Long, List<Score>> entry : scoresByClass.entrySet()) {
-            Long classId = entry.getKey();
-            List<Score> classScores = entry.getValue();
+            Long classId = entry.getKey(); //每个班级的id
+            List<Score> classScores = entry.getValue(); //每个班级的所有分数
             
             com.dxd.onlineexam.entity.Class clazz = classMapper.selectById(classId);
             if (clazz == null) {
                 continue;
             }
-            
+
+            //每个班级的统计数据集合
             Map<String, Object> classData = new HashMap<>();
             classData.put("classId", classId);
             classData.put("className", clazz.getClassName());
@@ -287,7 +289,8 @@ public class StatisticsService {
                     .divide(BigDecimal.valueOf(classScores.size()), 2, RoundingMode.HALF_UP);
             
             classData.put("passRate", passRate);
-            
+
+            //加入到统计数据集
             result.add(classData);
         }
         

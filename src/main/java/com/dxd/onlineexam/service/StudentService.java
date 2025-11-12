@@ -10,7 +10,6 @@ import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import java.math.BigDecimal;
-import java.math.RoundingMode;
 import java.time.Duration;
 import java.time.LocalDateTime;
 import java.util.*;
@@ -28,7 +27,6 @@ public class StudentService {
     private final AnswerRecordMapper answerRecordMapper;
     private final QuestionOptionMapper questionOptionMapper;
     private final SubjectMapper subjectMapper;
-    private final UserMapper userMapper;
 
     /**
      * 学生首页统计
@@ -444,102 +442,6 @@ public class StudentService {
     }
 
     /**
-     * 自动批改客观题
-     */
-    private BigDecimal autoGradeObjectiveQuestions(Long paperInstanceId) {
-        PaperInstance paperInstance = paperInstanceMapper.selectById(paperInstanceId);
-        
-        QueryWrapper<AnswerRecord> wrapper = new QueryWrapper<>();
-        wrapper.eq("paper_instance_id", paperInstanceId);
-        List<AnswerRecord> answerRecords = answerRecordMapper.selectList(wrapper);
-        
-        BigDecimal totalScore = BigDecimal.ZERO;
-        
-        for (AnswerRecord record : answerRecords) {
-            Question question = questionMapper.selectById(record.getQuestionId());
-            
-            // 只批改客观题
-            if ("subjective".equalsIgnoreCase(question.getType())) {
-                continue;
-            }
-            
-            // 获取该题在考试中的分数
-            QueryWrapper<ExamQuestion> eqWrapper = new QueryWrapper<>();
-            eqWrapper.eq("exam_id", paperInstance.getExamId())
-                     .eq("question_id", question.getQuestionId());
-            ExamQuestion examQuestion = examQuestionMapper.selectOne(eqWrapper);
-            
-            if (examQuestion == null) {
-                continue;
-            }
-            
-            BigDecimal actualScore = computeObjectiveScore(question, record.getStudentAnswer(), examQuestion.getScore());
-            totalScore = totalScore.add(actualScore);
-            
-            // 更新答题记录
-            record.setIsCorrect(actualScore != null && actualScore.compareTo(examQuestion.getScore()) == 0 ? 1 : 0);
-            record.setActualScore(actualScore);
-            record.setUpdateTime(LocalDateTime.now());
-            answerRecordMapper.updateById(record);
-        }
-        
-        return totalScore;
-    }
-
-    /**
-     * 检查答案是否正确
-     */
-    private BigDecimal computeObjectiveScore(Question question, String studentAnswer, BigDecimal fullScore) {
-        if (question == null || fullScore == null || fullScore.compareTo(BigDecimal.ZERO) <= 0) {
-            return BigDecimal.ZERO;
-        }
-        String qType = question.getType() == null ? "" : question.getType().trim().toLowerCase();
-        String correct = question.getCorrectAnswer();
-        if (correct == null || correct.trim().isEmpty()) {
-            return BigDecimal.ZERO;
-        }
-        String answer = studentAnswer == null ? "" : studentAnswer;
-        
-        if ("single".equals(qType) || "single_choice".equals(qType)
-                || "judge".equals(qType) || "true_false".equals(qType)) {
-            return correct.trim().equalsIgnoreCase(answer.trim()) ? fullScore : BigDecimal.ZERO;
-        }
-        if ("multiple".equals(qType) || "multiple_choice".equals(qType)) {
-            Set<String> correctSet = normalizeOptionSet(correct);
-            Set<String> studentSet = normalizeOptionSet(answer);
-            if (studentSet.isEmpty()) {
-                return BigDecimal.ZERO;
-            }
-            for (String s : studentSet) {
-                if (!correctSet.contains(s)) {
-                    return BigDecimal.ZERO;
-                }
-            }
-            if (studentSet.equals(correctSet)) {
-                return fullScore;
-            }
-            return fullScore.multiply(new BigDecimal("0.5")).setScale(2, RoundingMode.HALF_UP);
-        }
-        return BigDecimal.ZERO;
-    }
-
-    private Set<String> normalizeOptionSet(String raw) {
-        if (raw == null) return Collections.emptySet();
-        String cleaned = raw.trim().toUpperCase().replaceAll("[^A-Z,]", "");
-        Set<String> set = new HashSet<>();
-        if (cleaned.contains(",")) {
-            for (String part : cleaned.split(",")) {
-                if (!part.isEmpty()) set.add(part);
-            }
-        } else {
-            for (char c : cleaned.toCharArray()) {
-                if (c >= 'A' && c <= 'Z') set.add(String.valueOf(c));
-            }
-        }
-        return set;
-    }
-
-    /**
      * 获取成绩详情
      */
     public ScoreDetailVO getScoreDetail(Long examId, Long studentId) {
@@ -685,66 +587,5 @@ public class StudentService {
         }
     }
     
-    /**
-     * 创建成绩记录
-     */
-    private void createScoreRecord(PaperInstance paperInstance) {
-        // 检查是否已存在成绩记录
-        QueryWrapper<Score> wrapper = new QueryWrapper<>();
-        wrapper.eq("paper_instance_id", paperInstance.getPaperInstanceId());
-        Score existingScore = scoreMapper.selectOne(wrapper);
-        
-        if (existingScore != null) {
-            // 更新现有记录
-            existingScore.setObjectiveScore(paperInstance.getObjectiveScore());
-            existingScore.setSubjectiveScore(paperInstance.getSubjectiveScore());
-            existingScore.setTotalScore(paperInstance.getTotalScore());
-            existingScore.setUpdateTime(LocalDateTime.now());
-            scoreMapper.updateById(existingScore);
-        } else {
-            // 创建新记录
-            User student = userMapper.selectById(paperInstance.getStudentId());
-            Exam exam = examMapper.selectById(paperInstance.getExamId());
-            
-            Score score = new Score();
-            score.setPaperInstanceId(paperInstance.getPaperInstanceId());
-            score.setExamId(paperInstance.getExamId());
-            score.setStudentId(paperInstance.getStudentId());
-            score.setClassId(student != null ? student.getClassId() : null);
-            score.setObjectiveScore(paperInstance.getObjectiveScore());
-            score.setSubjectiveScore(paperInstance.getSubjectiveScore());
-            score.setTotalScore(paperInstance.getTotalScore());
-            
-            // 判断是否及格
-            if (exam != null && exam.getPassingScore() != null) {
-                score.setIsPassed(paperInstance.getTotalScore().compareTo(exam.getPassingScore()) >= 0 ? 1 : 0);
-            }
-            
-            score.setCreateTime(LocalDateTime.now());
-            score.setUpdateTime(LocalDateTime.now());
-            
-            scoreMapper.insert(score);
-        }
-        
-        // 计算排名
-        calculateRanking(paperInstance.getExamId());
-    }
-    
-    /**
-     * 计算排名
-     */
-    private void calculateRanking(Long examId) {
-        QueryWrapper<Score> wrapper = new QueryWrapper<>();
-        wrapper.eq("exam_id", examId)
-               .orderByDesc("total_score");
-        
-        List<Score> scores = scoreMapper.selectList(wrapper);
-        
-        int rank = 1;
-        for (Score score : scores) {
-            score.setRank(rank++);
-            scoreMapper.updateById(score);
-        }
-    }
 }
 
