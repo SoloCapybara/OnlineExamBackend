@@ -70,7 +70,7 @@ public class StudentController {
      */
     @PostMapping("/exams/{examId}/save-answer")
     public Result<Void> saveAnswer(@PathVariable Long examId, @RequestBody SaveAnswerRequest request) {
-        studentService.saveAnswer(request);
+        studentService.saveAnswer(examId, request);
         return Result.success();
     }
 
@@ -79,7 +79,7 @@ public class StudentController {
      */
     @PostMapping("/exams/{examId}/submit")
     public Result<Map<String, Object>> submitPaper(@PathVariable Long examId, @RequestBody SubmitPaperRequest request) {
-        Map<String, Object> result = studentService.submitPaper(request);
+        Map<String, Object> result = studentService.submitPaper(examId, request);
         return Result.success(result);
     }
 

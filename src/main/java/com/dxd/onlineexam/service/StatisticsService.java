@@ -296,9 +296,12 @@ public class StatisticsService {
         
         // 按平均分降序排序
         result.sort((a, b) -> {
-            BigDecimal avgA = (BigDecimal) a.get("avgScore");
-            BigDecimal avgB = (BigDecimal) b.get("avgScore");
-            return avgB.compareTo(avgA);
+            BigDecimal avgA = (BigDecimal) a.get("avgScore"); //a的平局分
+            BigDecimal avgB = (BigDecimal) b.get("avgScore"); //b的平均分
+            //avgB.compareTo(avgA) > 0 表示b的平均分大于a的平均分，返回1,
+            //avgB.compareTo(avgA) < 0 表示b的平均分小于a的平均分，返回-1,
+            //avgB.compareTo(avgA) == 0 表示b的平均分等于a的平均分，返回0
+            return avgB.compareTo(avgA); 
         });
         
         return result;

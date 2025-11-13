@@ -347,10 +347,15 @@ public class StudentService {
      * 保存答案
      */
     @Transactional
-    public void saveAnswer(SaveAnswerRequest request) {
+    public void saveAnswer(Long examId, SaveAnswerRequest request) {
         PaperInstance paperInstance = paperInstanceMapper.selectById(request.getPaperInstanceId());
         if (paperInstance == null) {
             throw new RuntimeException("试卷实例不存在");
+        }
+        
+        // 验证试卷实例是否属于指定的考试
+        if (!paperInstance.getExamId().equals(examId)) {
+            throw new RuntimeException("试卷实例不属于该考试");
         }
         
         if ("submitted".equals(paperInstance.getStatus())) {
@@ -386,10 +391,15 @@ public class StudentService {
      * 提交试卷
      */
     @Transactional
-    public Map<String, Object> submitPaper(SubmitPaperRequest request) {
+    public Map<String, Object> submitPaper(Long examId, SubmitPaperRequest request) {
         PaperInstance paperInstance = paperInstanceMapper.selectById(request.getPaperInstanceId());
         if (paperInstance == null) {
             throw new RuntimeException("试卷实例不存在");
+        }
+        
+        // 验证试卷实例是否属于指定的考试
+        if (!paperInstance.getExamId().equals(examId)) {
+            throw new RuntimeException("试卷实例不属于该考试");
         }
         
         if ("submitted".equals(paperInstance.getStatus())) {
@@ -493,7 +503,8 @@ public class StudentService {
         QueryWrapper<AnswerRecord> arWrapper = new QueryWrapper<>();
         arWrapper.eq("paper_instance_id", paperInstance.getPaperInstanceId());
         List<AnswerRecord> answerRecords = answerRecordMapper.selectList(arWrapper);
-        
+
+        //获取本考试所有题目
         QueryWrapper<ExamQuestion> eqWrapper = new QueryWrapper<>();
         eqWrapper.eq("exam_id", examId)
                  .orderByAsc("question_number");

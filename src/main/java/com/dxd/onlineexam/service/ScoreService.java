@@ -198,13 +198,16 @@ public class ScoreService {
         QueryWrapper<AnswerRecord> arWrapper = new QueryWrapper<>();
         arWrapper.eq("paper_instance_id", paperInstance.getPaperInstanceId());
         List<AnswerRecord> answerRecords = answerRecordMapper.selectList(arWrapper);
-        
+
+        //获取本场考试的所有题目
         QueryWrapper<ExamQuestion> eqWrapper = new QueryWrapper<>();
         eqWrapper.eq("exam_id", score.getExamId())
                  .orderByAsc("question_number");
         List<ExamQuestion> examQuestions = examQuestionMapper.selectList(eqWrapper);
-        
+
+        //对每一个examQuestion做处理(本考试的所有题目)
         List<ScoreDetailVO.QuestionDetail> questionDetails = examQuestions.stream().map(eq -> {
+            //找到对应的题目
             Question question = questionMapper.selectById(eq.getQuestionId());
             
             // 找到对应的答题记录
